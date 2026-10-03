@@ -270,7 +270,7 @@ Requires WebGL2, WebRTC DataChannels and Web Audio. Desktop keyboard + mouse; to
 - **Events, one code path:** the authority emits compact events (`dmg`, `kill`, `spawn`, `pick`, `rocket`, `boom`, …). The host applies them locally through the same `handleEvent()` the guest uses for events received over the network.
 - **Snapshots:** 52-byte binary packets (position, velocity, yaw/pitch, collider height, state flags, weapon, life counter) at 30 Hz on the unreliable channel. Snapshots are timestamped in host clock time.
 - **Validation:** `ShotValidator` (token-bucket fire rate and magazine accounting), shot-origin distance checks, pickup and interact distance checks, Energy budget limits for movement tricks, and teleport rejection.
-- **Assets:** the game ships no binary assets. Weapons, characters and the arena are procedural Three.js geometry. Textures are generated on canvas at load time (resolution follows the texture-quality setting), and all sound is synthesized. The whole game is about 520 KB of gzipped JavaScript.
+- **Assets:** the game ships no binary assets. Weapons, characters and the arena are procedural Three.js geometry. Textures are generated on canvas at load time (resolution follows the texture-quality setting), and all sound is synthesized. The whole game is about 365 KB of gzipped JavaScript (game + three.js); the Firebase chunk is only downloaded when Firebase signaling is configured.
 
 ---
 
