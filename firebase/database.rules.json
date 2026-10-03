@@ -1,0 +1,59 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "rooms": {
+      ".indexOn": ["meta/expiresAt"],
+      ".read": "auth != null && query.orderByChild == 'meta/expiresAt' && query.endAt != null && query.endAt <= now && query.limitToFirst != null && query.limitToFirst <= 25",
+      "$code": {
+        ".write": "auth != null && $code.matches(/^[A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9]?$/) && ((data.child('meta/hostUid').val() === auth.uid && (!newData.exists() || newData.child('meta/hostUid').val() === auth.uid)) || ((!data.child('meta').exists() || data.child('meta/expiresAt').val() < now) && (!newData.exists() || (newData.child('meta/hostUid').val() === auth.uid && newData.child('meta/expiresAt').val() > now && !newData.child('guest').exists() && !newData.child('toHost').exists() && !newData.child('toGuest').exists()))))",
+        ".validate": "$code.matches(/^[A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9]?$/) && newData.hasChild('meta')",
+
+        "meta": {
+          ".read": "auth != null && $code.matches(/^[A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9]?$/)",
+          ".write": "auth != null && newData.child('hostUid').val() === auth.uid && (!data.exists() || data.child('hostUid').val() === auth.uid || data.child('expiresAt').val() < now)",
+          ".validate": "newData.hasChildren(['hostUid', 'createdAt', 'expiresAt', 'status', 'v'])",
+          "hostUid": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 128" },
+          "createdAt": { ".validate": "newData.isNumber()" },
+          "expiresAt": { ".validate": "newData.isNumber() && newData.val() <= now + 3700000" },
+          "status": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 24" },
+          "v": { ".validate": "newData.isNumber()" },
+          "$other": { ".validate": false }
+        },
+
+        "guest": {
+          ".read": "auth != null && $code.matches(/^[A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9]?$/)",
+          ".write": "auth != null && $code.matches(/^[A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9][A-HJ-NP-Z2-9]?$/) && ((!newData.exists() && data.child('uid').val() === auth.uid) || (newData.child('uid').val() === auth.uid && (!data.exists() || data.child('uid').val() === auth.uid) && root.child('rooms/' + $code + '/meta').exists() && root.child('rooms/' + $code + '/meta/expiresAt').val() > now))",
+          ".validate": "newData.hasChildren(['uid', 'joinedAt'])",
+          "uid": { ".validate": "newData.isString() && newData.val() === auth.uid" },
+          "joinedAt": { ".validate": "newData.isNumber()" },
+          "$other": { ".validate": false }
+        },
+
+        "toHost": {
+          ".read": "auth != null && root.child('rooms/' + $code + '/meta/hostUid').val() === auth.uid",
+          "$msg": {
+            ".write": "auth != null && !data.exists() && newData.exists() && root.child('rooms/' + $code + '/guest/uid').val() === auth.uid",
+            ".validate": "$msg.length <= 32 && newData.hasChildren(['m', 't'])",
+            "m": { ".validate": "newData.isString() && newData.val().length < 12000" },
+            "t": { ".validate": "newData.isNumber()" },
+            "$other": { ".validate": false }
+          }
+        },
+
+        "toGuest": {
+          ".read": "auth != null && root.child('rooms/' + $code + '/guest/uid').val() === auth.uid",
+          "$msg": {
+            ".write": "auth != null && data.exists() && !newData.exists() && root.child('rooms/' + $code + '/guest/uid').val() === auth.uid",
+            ".validate": "$msg.length <= 32 && newData.hasChildren(['m', 't'])",
+            "m": { ".validate": "newData.isString() && newData.val().length < 12000" },
+            "t": { ".validate": "newData.isNumber()" },
+            "$other": { ".validate": false }
+          }
+        },
+
+        "$other": { ".validate": false }
+      }
+    }
+  }
+}

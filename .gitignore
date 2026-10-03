@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+.vite/
+
+# local environment (keep .env.example committed)
+.env
+.env.local
+.env.*.local
+
+# OS / editor noise
+.DS_Store
+
+# logs
+*.log
+
+# test output
+coverage/
+test-results/
+tests/screenshots/
+
+# local tooling
+.claude/

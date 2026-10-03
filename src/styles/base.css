@@ -1,0 +1,52 @@
+/* Design tokens + global layout shared by menus (menu.css) and the HUD (hud.css). */
+:root {
+  --acid: #7dff1a;
+  --acid-deep: #39d10a;
+  --acid-glow: #a6ff4d;
+  --acid-dim: rgba(125, 255, 26, 0.16);
+  --p1: #7dff1a;
+  --p2: #ff8a1f;
+  --black: #050605;
+  --matte: #0b0d0c;
+  --charcoal: #16191a;
+  --gunmetal: #2a2f31;
+  --steel: #5b6265;
+  --white: #f2f5f0;
+  --text: #e6ebe3;
+  --text-dim: rgba(230, 235, 227, 0.58);
+  --red: #ff2a1a;
+  --orange: #ff7a1a;
+  --panel: rgba(8, 11, 9, 0.78);
+  --panel-solid: #0a0d0b;
+  --line: rgba(125, 255, 26, 0.28);
+  --font-display: 'Teko', 'Rajdhani', 'Arial Narrow', Impact, sans-serif;
+  --font-ui: 'Rajdhani', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-snap: cubic-bezier(0.2, 1.4, 0.4, 1);
+  --cut: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+}
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #020302;
+  color: var(--text);
+  font-family: var(--font-ui);
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app { position: fixed; inset: 0; overflow: hidden; }
+#game { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; }
+#ui { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+#ui button,
+#ui input,
+#ui select,
+#ui textarea,
+#ui a,
+#ui .interactive { pointer-events: auto; }

@@ -1,0 +1,28 @@
+{
+  "name": "monster-x-duel-arena",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MONSTER-X: DUEL ARENA - a browser-based online 1v1 arena FPS (Three.js + WebRTC)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "signal": "peerjs --port 9000 --path /",
+    "test:e2e": "node tests/e2e-duel.mjs",
+    "test:e2e:public": "node tests/e2e-duel.mjs --public",
+    "test:solo": "node tests/e2e-solo.mjs",
+    "test:reconnect": "node tests/e2e-reconnect.mjs",
+    "screenshots": "node tests/capture-screenshots.mjs"
+  },
+  "dependencies": {
+    "firebase": "^11.0.0",
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "node-turn": "^0.0.6",
+    "peer": "^1.0.2",
+    "puppeteer-core": "^24.43.1",
+    "vite": "^7.0.0"
+  }
+}
