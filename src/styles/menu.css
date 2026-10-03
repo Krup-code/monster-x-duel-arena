@@ -480,6 +480,9 @@
 .mx-keyslot:hover { box-shadow: inset 0 0 0 1px var(--acid); }
 .mx-keyslot.is-empty { color: rgba(230, 235, 227, 0.3); }
 .mx-keyslot.is-listening { color: #071002; background: var(--acid); animation: mx-blink 0.9s steps(2) infinite; }
+.mx-keyslot--ref { min-width: 54px; padding: 4px 9px; font-size: 13px; }
+.mx-keyslot--ref.is-unbound { color: var(--red); }
+.mx-ref__hint { margin: 0 0 12px; }
 .mx-screen--settings.is-capturing .mx-tabs { pointer-events: none; opacity: 0.5; }
 .mx-callout { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; background: rgba(40, 18, 4, 0.6); box-shadow: inset 0 0 0 1px rgba(255, 138, 31, 0.45); color: var(--text); font-size: 13.5px; }
 .mx-callout__icon { color: var(--p2); flex: none; }

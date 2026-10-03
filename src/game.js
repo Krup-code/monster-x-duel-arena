@@ -139,7 +139,14 @@ export class Game {
     return `${g.textures}|${g.geometry}|${g.lighting}|${g.effects}`;
   }
 
-  async _loadArena(mapId, onProgress = null, showScreen = true) {
+  /** Arena loads run one at a time, so an unawaited load (toMainMenu) can never race a new one. */
+  _loadArena(...args) {
+    const p = (this._arenaQueue || Promise.resolve()).catch(() => {}).then(() => this._loadArenaNow(...args));
+    this._arenaQueue = p;
+    return p;
+  }
+
+  async _loadArenaNow(mapId, onProgress = null, showScreen = true) {
     if (showScreen) { this.ui.show('loading'); this.ui.setLoading(0, 'LOADING ARENA'); }
     const progress = onProgress || ((p) => this.ui.setLoading(p * 0.95, 'LOADING ARENA'));
     if (this.arena && this.arena.id === mapId && this.arenaKey === this.qualityKey()) { progress(1); return this.arena; }
@@ -147,6 +154,7 @@ export class Game {
       this.scene.remove(this.arena.group);
       this.arena.dispose();
       this.audio.clearAmbient();
+      this.arena = null; // never hand out a disposed arena
     }
     const g = settings.data.graphics;
     if (this.libQuality !== g.textures) {
@@ -243,6 +251,7 @@ export class Game {
     const g = settings.data.graphics;
     if (section === 'audio') this.audio.setVolumes(settings.data.audio);
     if (section === 'crosshair') this._applyCrosshair();
+    if (section === 'controls' && (!key || key === 'autoSwap')) this._sendPrefs();
     if (section === 'graphics') {
       if (!key || key === 'renderScale') this._resize();
       if (!key || key === 'shadows') this._applyShadows(true);
@@ -352,6 +361,11 @@ export class Game {
       this._updateMatchUi();
     } else {
       this._updateMenuCamera(realDt);
+      // Keep the lobby's ping readout live.
+      if (this.lobby && this.ui.current === 'lobby' && now - (this._lobbyPingAt || 0) > 500) {
+        this._lobbyPingAt = now;
+        this._pushLobby();
+      }
     }
     if (this.arena) {
       this.arena.update(realDt * (this.mc ? this.mc.fxTimeScale : 1), t);
@@ -501,6 +515,11 @@ export class Game {
     this.ui.hud.setVisible(false);
     this.postfx.state.desat = 0;
     this.timeScale = 1;
+    this._loadedPending = false;
+    // Back to menus: un-duck audio, give keys back to the browser, drop held/toggled input.
+    this.audio?.setMuffled(false);
+    this.input.enabled = false;
+    this.input.reset();
   }
 
   _myName(index) {
@@ -537,15 +556,18 @@ export class Game {
     this.ui.show(null);
     this.ui.hud.setVisible(true);
     this.ui.hud.setOverlay(this.inputActive ? null : 'resume');
+    // Without the mouse (lock lost during loading, or refused) an offline match waits for the click.
+    if (mc.role === 'offline' && !this.inputActive) mc.paused = true;
     this.input.enabled = true;
     this.viewmodel.setAccent(mc.me === 0 ? 0x7dff1a : 0xff8a1f);
-    this.viewmodel.setVisible(true);
+    // A reconnect resume keeps the current state (sudden death, or dead and waiting to respawn).
+    const resume = !!e?.resume;
+    this.viewmodel.setVisible(resume ? !!mc.local.alive : true);
     this.audio.startMusic('match');
-    this.audio.setSuddenDeath(false);
-    this.audio.setMuffled(false);
+    this.audio.setSuddenDeath(resume && mc.view.phase === 'suddendeath');
+    this.audio.setMuffled(resume ? !mc.local.alive : false);
     this.ui.end.setRematchStatus({ me: false, them: false, online: mc.online });
     this.updateMatchState();
-    void e;
   }
 
   showEndScreen(mc) {
@@ -563,6 +585,7 @@ export class Game {
     if (isError) {
       // The browser refused the lock (no user gesture yet): ask for a click instead of pausing.
       if (!mc.ended && this.ui.current !== 'pause') this.ui.hud.setOverlay('resume');
+      if (mc.role === 'offline' && !mc.ended) mc.paused = true;
       return;
     }
     if (locked) {
@@ -596,9 +619,13 @@ export class Game {
       return code;
     } catch (e) {
       console.error(e);
-      if (this.net === net) { net.leave(false); this.net = null; }
-      this.toMainMenu();
-      this.ui.toast(`COULD NOT CREATE ROOM — ${friendlyNetError(e.message)}`, 'error', 4200);
+      // Only report on the attempt that still owns the session (not one the user already left).
+      if (this.net === net) {
+        net.leave(false);
+        this.net = null;
+        this.toMainMenu();
+        this.ui.toast(`COULD NOT CREATE ROOM — ${friendlyNetError(e.message)}`, 'error', 4200);
+      }
       throw e;
     }
   }
@@ -619,21 +646,37 @@ export class Game {
       net.on('connected', resolve);
       net.on('closed', (info) => reject(new Error(info?.reason || 'connect-failed')));
     });
+    // CANCEL settles the attempt right away instead of leaving it pending for 25 s.
+    const aborted = new Promise((_, reject) => { net.abortJoin = () => reject(new Error('CANCELLED')); });
+    aborted.catch(() => {});
+    let timer = 0;
     try {
-      await net.join(code);
-      await Promise.race([connected, new Promise((_, rej) => setTimeout(() => rej(new Error('ice-failed')), 25000))]);
+      await Promise.race([net.join(code), aborted]);
+      await Promise.race([connected, aborted, new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('ice-failed')), 25000); })]);
       if (this.net !== net) return;
       this.lobby.names[0] = net.peerName || 'PLAYER 1';
       this.setState('LOBBY');
       this.ui.show('lobby');
       this._pushLobby();
-      net.send('prefs', { autoSwap: !!settings.data.controls.autoSwap });
+      this._sendPrefs();
     } catch (e) {
-      if (this.net === net) { net.leave(false); this.net = null; }
-      this.lobby = null;
-      this.setState('MAIN_MENU');
+      // A stale attempt (cancelled, then the user hosted or joined again) must not touch the new session.
+      if (this.net === net) {
+        net.leave(false);
+        this.net = null;
+        this.lobby = null;
+        this.setState('MAIN_MENU');
+      }
       throw e;
+    } finally {
+      clearTimeout(timer);
+      net.abortJoin = null;
     }
+  }
+
+  /** Guest -> host: gameplay preferences the host's authority needs (auto-swap). */
+  _sendPrefs() {
+    if (this.net?.role === 'guest' && this.net.connected) this.net.send('prefs', { autoSwap: !!settings.data.controls.autoSwap });
   }
 
   _wireNet(net) {
@@ -668,8 +711,17 @@ export class Game {
         this.mc.netPaused = false;
         this.ui.hud.setOverlay(this.inputActive ? null : 'resume');
         if (net.role === 'host') {
+          // A reloaded guest restarts its snapshot sequence numbers.
+          if (this.mc.remote) { this.mc.remote.loss.reset(); this.mc.remote.rejects = 0; }
           this.mc.authority?.pause(false);
-          this.mc.authority?.resync();
+          if (this.mc.authority?.phase === 'idle' && this.lobby?.inMatchMap) {
+            // Dropped while loading: have the guest (re)load and report 'loaded'.
+            this.lobby.loaded[1] = false;
+            this.net.send('load', { map: this.lobby.inMatchMap, resume: true });
+          } else this.mc.authority?.resync();
+        } else if (this._loadedPending) {
+          this._loadedPending = false;
+          this.net.send('loaded');
         }
         this.ui.toast('CONNECTION RESTORED', 'success');
         this.updateMatchState();
@@ -677,10 +729,13 @@ export class Game {
         this._broadcastLobby();
         if (this.lobby?.inMatchMap) this.net.send('load', { map: this.lobby.inMatchMap, resume: true });
       }
+      this._sendPrefs();
       this._pushLobby();
     });
     net.on('closed', (info) => {
       if (this.net !== net) return;
+      // A join that fails before it connects is reported on the join screen by joinMatch.
+      if (net.role === 'guest' && this.state === 'JOINING_ROOM') return;
       const inMatch = !!this.mc;
       if (net.role === 'host' && info?.roomOpen) {
         // Opponent left: keep the room open for a new challenger.
@@ -691,6 +746,7 @@ export class Game {
         this.lobby.ready = [false, false];
         this.lobby.rematch = [false, false];
         this.lobby.inMatchMap = null;
+        this.lobby.guestPrefs = null;
         this.ui.show('lobby');
         this.setState('LOBBY');
         this._pushLobby();
@@ -715,6 +771,11 @@ export class Game {
         case 'loaded': this.lobby.loaded[1] = true; this._maybeStartOnline(); return;
         case 'rematch': this.lobby.rematch[1] = true; this._rematchStatus(); this._maybeRematch(); return;
         case 'toLobby': this._backToLobby(false); return;
+        case 'prefs':
+          // Arrives in the lobby (no match yet): keep it and apply it to every match.
+          this.lobby.guestPrefs = { autoSwap: !!m.autoSwap };
+          this.mc?.onGuestMessage(m);
+          return;
         default: this.mc?.onGuestMessage(m); return;
       }
     }
@@ -802,10 +863,16 @@ export class Game {
     L.inMatchMap = L.map;
     this.net.send('load', { map: L.map });
     this.setState('LOADING');
+    const net = this.net;
     await this._loadArena(L.map);
-    if (!this.net?.connected) return;
+    // Still the same session? (A brief reconnect while loading is fine: the match waits for it.)
+    if (this.net !== net || this.lobby !== L || net.closed) return;
     this._disposeMatch();
     this.mc = new MatchClient(this, { mode: 'duel', role: 'host', myIndex: 0, names: [L.names[0] || 'PLAYER 1', L.names[1] || 'PLAYER 2'] });
+    const ra = this.mc.authority?.avatars?.[1];
+    if (ra) ra.autoSwap = !!L.guestPrefs?.autoSwap;
+    if (!net.connected) { this.mc.netPaused = true; this.mc.authority?.pause(true); }
+    this._onVisibility();
     this.ui.show('loading');
     this.ui.setLoading(1, 'WAITING FOR OPPONENT');
     L.loaded[0] = true;
@@ -822,15 +889,19 @@ export class Game {
   }
 
   async _guestLoad(map) {
+    const net = this.net, L = this.lobby;
+    if (!net || !L) return;
     this.setState('LOADING');
-    this.lobby.inMatchMap = map;
+    L.inMatchMap = map;
     await this._loadArena(map);
-    if (!this.net?.connected) return;
+    if (this.net !== net || this.lobby !== L || net.closed) return;
     this._disposeMatch();
-    this.mc = new MatchClient(this, { mode: 'duel', role: 'guest', myIndex: 1, names: [this.lobby.names[0] || 'PLAYER 1', this.lobby.names[1] || 'PLAYER 2'] });
+    this.mc = new MatchClient(this, { mode: 'duel', role: 'guest', myIndex: 1, names: [L.names[0] || 'PLAYER 1', L.names[1] || 'PLAYER 2'] });
+    this._onVisibility();
     this.ui.show('loading');
     this.ui.setLoading(1, 'WAITING FOR HOST');
-    this.net.send('loaded');
+    // If the link is down right now, report 'loaded' as soon as it is back.
+    if (net.connected) { this._sendPrefs(); net.send('loaded'); } else { this.mc.netPaused = true; this._loadedPending = true; }
   }
 
   /** Guest receives 'start' without having loaded (e.g. rejoined a running match after a reload). */
@@ -838,10 +909,15 @@ export class Game {
     if (this._entering) { this.pendingEvents?.push(startEvt); return; }
     this._entering = true;
     this.pendingEvents = [startEvt];
+    const net = this.net;
     try {
       await this._loadArena(startEvt.map);
+      // The session may have closed while we loaded (toMainMenu cleared the queue).
+      if (!net || this.net !== net || !this.pendingEvents) return;
       this._disposeMatchKeepQueue();
       this.mc = new MatchClient(this, { mode: 'duel', role: 'guest', myIndex: 1, names: startEvt.names || ['PLAYER 1', 'PLAYER 2'] });
+      this._onVisibility();
+      this._sendPrefs();
       const q = this.pendingEvents;
       this.pendingEvents = null;
       for (const e of q) this.mc.handleEvent(e);
@@ -865,17 +941,20 @@ export class Game {
       mc.startAuthority(true);
       return;
     }
+    // Lock the mouse only when this click actually starts the rematch; while waiting for the
+    // opponent the end screen's buttons must stay clickable.
     if (this.net?.role === 'host') {
       this.lobby.rematch[0] = true;
       mc.rematchReq.me = true;
       this._rematchStatus();
       this._maybeRematch();
+      if (!mc.ended) this.input.requestLock();
     } else {
       mc.rematchReq.me = true;
       this.net?.send('rematch');
       this.ui.end.setRematchStatus({ me: true, them: mc.rematchReq.them, online: true });
+      if (mc.rematchReq.them) this.input.requestLock();
     }
-    this.input.requestLock();
   }
 
   _rematchStatus() {
@@ -944,7 +1023,11 @@ export class Game {
       actions: {
         hostMatch: () => game.hostMatch(),
         joinMatch: (code) => game.joinMatch(code),
-        cancelJoin: () => { if (game.net && !game.net.connected) { game.net.leave(false); game.net = null; game.lobby = null; } game.setState('MAIN_MENU'); },
+        cancelJoin: () => {
+          const net = game.net;
+          if (net && !net.connected) { net.leave(false); game.net = null; game.lobby = null; net.abortJoin?.(); }
+          game.setState('MAIN_MENU');
+        },
         leaveRoom: () => game.toMainMenu(),
         setReady: (v) => game.setReady(v),
         selectMap: (id) => game.selectMap(id),

@@ -118,7 +118,8 @@ function rocketMesh(color = 0xff7a1a) {
   const mat = new THREE.MeshStandardMaterial({ color: 0x1a1d1e, metalness: 0.8, roughness: 0.35 });
   g.add(new THREE.Mesh(rocketGeo.body, mat));
   g.add(new THREE.Mesh(rocketGeo.nose, new THREE.MeshBasicMaterial({ color: new THREE.Color(0x7dff1a).multiplyScalar(3) })));
-  const glow = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(5), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+  if (!rocketGeo.glow) rocketGeo.glow = new THREE.SphereGeometry(0.09, 10, 8); // shared, never disposed
+  const glow = new THREE.Mesh(rocketGeo.glow, new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(5), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
   glow.position.z = 0.26;
   g.add(glow);
   return g;
@@ -161,7 +162,7 @@ export class MatchClient {
     this.remote = null;
     this.bot = null;
     if (this.mode === 'duel') {
-      this.remote = { buffer: new SnapshotBuffer(48), spawnPos: new THREE.Vector3(), stepDist: 0, lastPos: new THREE.Vector3(), lastRenderPos: new THREE.Vector3(), loss: new LossTracker(), weapon: 'razor', flags: 0, render: null, lastSnapAt: 0, lastValidPos: null };
+      this.remote = { buffer: new SnapshotBuffer(48), spawnPos: new THREE.Vector3(), stepDist: 0, lastPos: new THREE.Vector3(), lastRenderPos: new THREE.Vector3(), loss: new LossTracker(), weapon: 'razor', flags: 0, render: null, lastSnapAt: 0, lastValidPos: null, rejects: 0 };
     } else if (this.mode === 'bot') {
       const sim = new PlayerSim(this.world);
       const weapons = new WeaponController();
@@ -275,21 +276,43 @@ export class MatchClient {
   /** Binary snapshot from the other peer. */
   onRemoteState(buf) {
     const r = this.remote;
-    if (!r) return;
+    if (!r || !(buf?.byteLength >= 52)) return;
     const s = decodeState(buf);
+    const t = performance.now();
+    if (this.role === 'host' && !this._validGuestState(s, r, t)) return;
     if (!r.loss.accept(s.seq)) return;
-    // Host-side sanity: drop impossible teleports within the same life.
-    if (this.role === 'host') {
-      const prev = r.buffer.latest();
-      if (prev && prev.life === s.life) {
-        const dt = Math.max(0.016, (s.time - prev.time) / 1000);
-        const d = prev.pos.distanceTo(s.pos);
-        if (d > 6 && d / dt > 55 && (r.rejects = (r.rejects || 0) + 1) < 8) { console.warn('[host] rejected teleport', d.toFixed(1)); return; }
-      }
-      r.rejects = 0;
-    }
     r.buffer.push(s);
-    r.lastSnapAt = performance.now();
+    r.lastSnapAt = t;
+  }
+
+  /**
+   * Host-side sanity for guest snapshots (the guest moves itself; the host only bounds it).
+   * Everything here fails closed: NaN/Infinity, a stale or forged life, a forged timestamp,
+   * or moving faster than any legal movement can (judged by host receive time).
+   */
+  _validGuestState(s, r, t) {
+    const fin = Number.isFinite;
+    if (![s.time, s.pos.x, s.pos.y, s.pos.z, s.vel.x, s.vel.y, s.vel.z, s.yaw, s.pitch, s.height].every(fin)) return false;
+    if (Math.abs(s.pos.x) > 1000 || Math.abs(s.pos.y) > 1000 || Math.abs(s.pos.z) > 1000) return false;
+    if (Math.abs(s.time - t) > 1500) return false;
+    // Only the current life counts: older lives are corpse positions still in flight.
+    const life = this.authority?.ps[this.opp]?.life;
+    if (life !== undefined && s.life !== life) return false;
+    s.height = Math.min(PLAYER.height, Math.max(PLAYER.slideHeight, s.height));
+    s.pitch = Math.min(89 * DEG, Math.max(-89 * DEG, s.pitch));
+    const prev = r.buffer.latest();
+    if (prev && prev.life === s.life) {
+      // 45 m/s covers sprinting, slides, jump pads, falls and rocket jumps; a long gap
+      // earns a proportionally bigger budget so an honest guest is never stuck.
+      const elapsed = Math.max(0, (t - (r.lastSnapAt || t)) / 1000);
+      const d = prev.pos.distanceTo(s.pos);
+      if (d > 2 + 45 * elapsed) {
+        if (++r.rejects % 30 === 1) console.warn('[host] rejected teleport', d.toFixed(1));
+        return false;
+      }
+    }
+    r.rejects = 0;
+    return true;
   }
 
   // ------------------------------------------------------------------ main update
@@ -305,10 +328,12 @@ export class MatchClient {
 
     this._updatePhaseTimeline(now);
     const inputActive = g.inputActive && !this.paused && !this.netPaused;
-    this._updateLocal(dt, now, inputActive);
+    // An offline pause freezes the whole world, including our own momentum, reloads and rockets.
+    const sdt = this.role === 'offline' && this.paused ? 0 : dt;
+    this._updateLocal(sdt, now, inputActive);
     if (this.bot && !this.paused) this._updateBot(dt, now);
     this._updateOpponentView(realDt, now);
-    this._updateRockets(dt, now);
+    this._updateRockets(sdt, now);
     this._updateCamera(realDt, now);
     this._sendSnapshot(realDt);
     this._updateMusic(realDt);
@@ -417,6 +442,7 @@ export class MatchClient {
     const firingRecently = now - L.lastFireAt < 0.25 || this._winp.fire;
     L.input.firing = firingRecently;
     L.input.moveMul = def.moveMul * (firingRecently ? def.fireMoveMul : 1);
+    if (dt <= 0) return; // paused
     if (alive) {
       const ctx = {
         speed: sim.horizontalSpeed(), onGround: sim.onGround, sprinting: sim.sprinting, sliding: sim.sliding, crouching: sim.crouching,
@@ -509,11 +535,11 @@ export class MatchClient {
         break;
       case 'reloadEnd':
         a.play(e.pump ? 'crush_pump' : 'reload_bolt', { volume: 0.8 });
-        if (!this.authority) this.g.net.send('reload', { w: W.current });
+        if (!this.authority) this.g.net.send('reload', { w: W.current, ct: this.now() });
         break;
       case 'shell':
         a.play('shell_insert', { volume: 0.8 });
-        if (!this.authority) this.g.net.send('reload', { w: W.current, shell: true });
+        if (!this.authority) this.g.net.send('reload', { w: W.current, shell: true, ct: this.now() });
         break;
       case 'switch':
         a.play('weapon_switch', { volume: 0.7 });
@@ -559,7 +585,8 @@ export class MatchClient {
     const dir = forwardFrom(this.viewYaw, this.viewPitch, new THREE.Vector3());
     const sid = ++this.shotSeq;
     const vt = this._remoteViewTime(now);
-    const msg = { w: e.weapon, o: [eye.x, eye.y, eye.z], d: [dir.x, dir.y, dir.z], seed: e.seed, sp: e.spread, vt, sid };
+    // ct: our own (host-synced) shot time, so the host checks cadence without network jitter
+    const msg = { w: e.weapon, o: [eye.x, eye.y, eye.z], d: [dir.x, dir.y, dir.z], seed: e.seed, sp: e.spread, vt, sid, ct: now };
     // --- instant local feedback ---
     g.viewmodel.fire(e.weapon);
     g.audio.play(def.sound, { volume: 0.9, pitchVar: 0.03 });
@@ -783,7 +810,10 @@ export class MatchClient {
       const t = this.g.net.now() - this.interpDelay();
       const s = r.buffer.sample(t);
       r.render = { pos: s.pos, height: s.height, yaw: s.yaw, pitch: s.pitch, vel: s.vel, valid: s.valid && s.life === ps.life };
-      if (!s.valid) { model.setVisible(false); return; }
+      // Snapshots from the previous life (still in flight after a respawn) would draw the
+      // opponent standing at their corpse: hide until the new life's snapshots arrive.
+      if (!r.render.valid && !model._rag) { model.setVisible(false); return; }
+      if (!s.valid) return;
       const wid = WEAPON_BY_ID[s.weapon];
       if (wid && ps.alive) this._setOppWeapon(wid);
       st = {
@@ -872,7 +902,9 @@ export class MatchClient {
         fx.glow.emit(_v.copy(r.pos).addScaledVector(r.dir, -0.25), _v2.set(0, 0, 0), _col.setRGB(2.6, 1.3, 0.4), 0.1, 0.25, 0.1, 1);
       }
     };
-    for (const r of this.rockets.values()) step(r);
+    // Authoritative visuals end on 'boom'; cull any the authority dropped (match end, pause).
+    for (const [k, r] of this.rockets) if (now - r.born > 7) { this._removeRocket(r); this.rockets.delete(k); }
+    if (!this.netPaused) for (const r of this.rockets.values()) step(r);
     for (const r of this.predictedRockets.values()) step(r);
     for (const [k, r] of this.predictedRockets) if (r.exploded && now - r.born > 8) this.predictedRockets.delete(k);
   }
@@ -1108,7 +1140,10 @@ export class MatchClient {
           const L = this.local;
           const first = !this.spawnedOnce;
           this.spawnedOnce = true;
-          if (!e.resume || first) {
+          // A resume spawn for a life we never saw (the respawn happened while the link was
+          // down) is a real respawn: move to the spawn point and take the fresh loadout.
+          const newLife = e.life !== L.life || !L.alive;
+          if (!e.resume || first || newLife) {
             L.sim.reset(pos, e.yaw ?? 0);
             L.weapons.reset(e.inv || STARTING);
             L.weapons.infiniteAmmo = this.mode === 'training';
@@ -1531,6 +1566,16 @@ export class MatchClient {
       if (mine && this.role === 'guest') {
         for (const slot of ['primary', 'secondary', 'special']) {
           if (mine[slot] && W.inventory[slot] !== mine[slot]) W.give(mine[slot], false);
+          else if (!mine[slot] && W.inventory[slot]) {
+            // The host says this slot is empty (e.g. we respawned while disconnected).
+            const old = W.inventory[slot];
+            W.inventory[slot] = null;
+            delete W.ammo[old];
+            if (W.current === old) {
+              W.current = W.inventory.primary || W.inventory.secondary;
+              this.g.viewmodel.setWeapon(W.current);
+            }
+          }
         }
       }
     }
@@ -1548,6 +1593,11 @@ export class MatchClient {
     if (this.ended) return;
     this.ended = true;
     v.phase = 'ended';
+    // The authority drops in-flight rockets at the end without a 'boom'.
+    for (const r of this.rockets.values()) this._removeRocket(r);
+    this.rockets.clear();
+    for (const r of this.predictedRockets.values()) this._removeRocket(r);
+    this.predictedRockets.clear();
     v.winner = e.winner;
     v.endedAt = performance.now() / 1000;
     const victory = e.winner === this.me;

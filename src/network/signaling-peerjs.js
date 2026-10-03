@@ -50,6 +50,7 @@ class BrokerSocket {
     this.id = id;
     return new Promise((resolve, reject) => {
       let settled = false;
+      let opened = false;
       const ws = new WebSocket(this.url(id));
       this.ws = ws;
       const timer = setTimeout(() => {
@@ -59,7 +60,7 @@ class BrokerSocket {
         let m;
         try { m = JSON.parse(e.data); } catch { return; }
         if (m.type === 'OPEN') {
-          if (!settled) { settled = true; clearTimeout(timer); this._startHeartbeat(); resolve(); }
+          if (!settled) { settled = true; opened = true; clearTimeout(timer); this._startHeartbeat(); resolve(); }
           return;
         }
         if (m.type === 'ID-TAKEN') {
@@ -77,23 +78,32 @@ class BrokerSocket {
         if (!settled) { settled = true; clearTimeout(timer); reject(new Error('SIGNAL_UNREACHABLE')); }
       };
       ws.onclose = () => {
-        clearInterval(this.hb);
+        if (this.ws === ws) clearInterval(this.hb);
         if (!settled) { settled = true; clearTimeout(timer); reject(new Error('SIGNAL_CLOSED')); return; }
-        if (!this.closedByUser) this._reconnect();
+        // Only a socket that was actually up (and is still current) triggers a reconnect; failed
+        // attempts are retried by the reconnect loop itself.
+        if (opened && this.ws === ws && !this.closedByUser) this._reconnect();
       };
     });
   }
 
   async _reconnect() {
-    if (this.reconnects > 20 || this.closedByUser) { this.onLost(); return; }
-    this.reconnects++;
-    await new Promise((r) => setTimeout(r, Math.min(4000, 500 * this.reconnects)));
-    if (this.closedByUser) return;
+    if (this._reconnecting) return;
+    this._reconnecting = true;
     try {
-      await this.open(this.id);
-      this.reconnects = 0;
-    } catch {
-      this._reconnect();
+      while (!this.closedByUser) {
+        if (this.reconnects > 20) { this.onLost(); return; }
+        this.reconnects++;
+        await new Promise((r) => setTimeout(r, Math.min(4000, 500 * this.reconnects)));
+        if (this.closedByUser) return;
+        try {
+          await this.open(this.id);
+          this.reconnects = 0;
+          return;
+        } catch { /* retry */ }
+      }
+    } finally {
+      this._reconnecting = false;
     }
   }
 
@@ -176,13 +186,14 @@ export class PeerJSSignaling {
     await throwawayOfferSdp();
     await this.sock.open(NET.peerPrefix + 'g-' + randToken().slice(0, 10));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { cleanup(); reject(new Error('ROOM_NOT_FOUND')); }, 12000);
+      // A refused or unanswered join was never paired, so close() must not send the host a 'bye'.
+      const fail = (err) => { cleanup(); this.peer = null; reject(err); };
+      const timer = setTimeout(() => fail(new Error('ROOM_NOT_FOUND')), 12000);
       const onMsg = (msg) => {
-        if (msg.k === 'expire') { cleanup(); reject(new Error('ROOM_NOT_FOUND')); }
+        if (msg.k === 'expire') fail(new Error('ROOM_NOT_FOUND'));
         else if (msg.k === 'welcome') {
-          cleanup();
-          if (msg.accept) resolve(msg);
-          else reject(new Error(msg.reason === 'full' ? 'ROOM_FULL' : 'ROOM_REJECTED'));
+          if (msg.accept) { cleanup(); resolve(msg); }
+          else fail(new Error(msg.reason === 'full' ? 'ROOM_FULL' : 'ROOM_REJECTED'));
         }
       };
       const cleanup = () => { clearTimeout(timer); this.handlers = this.handlers.filter((h) => h !== onMsg); };

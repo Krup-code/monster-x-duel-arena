@@ -86,7 +86,7 @@ No downloads and no installs. Both players open the same URL in a desktop browse
 | Pause / release mouse | `Esc` |
 | Network debug panel | `F3` |
 
-Everything is rebindable in **Settings → Controls**. Browsers reserve some shortcuts (e.g. `Ctrl+W` closes the tab), so **`C` is the safer crouch key**. In fullscreen on Chrome/Edge, the game uses the Keyboard Lock API so `Ctrl`, `W` and `Tab` reach the game; hold `Esc` to leave fullscreen.
+Every action is rebindable: open **CONTROLS** from the main menu (or **Settings → Controls**), click a key, and press the new key or mouse button. `Esc` cancels, `Backspace` clears a slot, and **RESET TO DEFAULTS** restores everything. Bindings are saved in the browser, and in-game prompts show your keys. Browsers reserve some shortcuts (e.g. `Ctrl+W` closes the tab), so **`C` is the safer crouch key**. In fullscreen on Chrome/Edge, the game uses the Keyboard Lock API so `Ctrl`, `W` and `Tab` reach the game; hold `Esc` to leave fullscreen.
 
 ---
 
@@ -216,6 +216,8 @@ It checks: main menu → HOST MATCH → room code → invite link → JOIN → W
 
 Options: `--public` uses the real public PeerJS broker, `--headful` shows the windows, `--kills=N` shortens the match, and `--turn` relays media through a local TURN server. Use `--turn` when a VPN (e.g. Cloudflare WARP) blocks same-machine UDP; its relay drops connections periodically, which also exercises the reconnect path. The test uses your installed Chrome (`CHROME_PATH` overrides the location).
 
+Other suites (run `npm run build` first): `npm run test:solo` (bot match, training and graphics presets), `npm run test:reconnect` (drop and resume a connection), and `npm run test:rebind` (rebind keys from the menus and use them in a match).
+
 ---
 
 ## Troubleshooting
@@ -283,6 +285,7 @@ vite.config.js              Relative base, chunking (three / lazy firebase)
 firebase/                   Realtime Database rules + setup guide
 public/                     icons/ (favicon); models/, textures/, audio/ notes
 tests/e2e-duel.mjs          Two-browser online duel test
+tests/e2e-*.mjs             Solo, reconnect and key-rebinding tests
 src/
   main.js                   Boot (WebGL2 check)
   game.js                   Renderer, loop, app state machine, menu/lobby/match flows

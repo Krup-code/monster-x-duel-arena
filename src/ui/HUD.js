@@ -1,6 +1,11 @@
 // In-game HUD (prefix hud-). update(state) runs every frame, so every DOM write is
 // diffed against the previously written value and nothing allocates per frame.
 import { CSS_P1, CSS_P2 } from '../config.js';
+import { settings } from '../settings.js';
+import { codeLabel } from '../input.js';
+
+/** Label of the first key bound to an action (prompts follow the player's rebinds). */
+const keyFor = (action) => { const c = settings.data.controls.bindings[action]?.[0]; return c ? codeLabel(c) : '?'; };
 
 function h(tag, cls, text) {
   const n = document.createElement(tag);
@@ -348,6 +353,7 @@ export class HUD {
       }
     }
     show(this.enReady, !!s.rushReady && live);
+    if (s.rushReady && live) txt(this.enReadyKey, keyFor('rush'));
     cls(this.energy, 'is-ready', !!s.rushReady);
     cls(this.energy, 'is-rush', !!s.rushActive);
     show(this.rushBar, !!s.rushActive);
@@ -386,7 +392,7 @@ export class HUD {
     // ---- prompts
     const inter = s.interact && !s.dead;
     show(this.interact, !!inter);
-    if (inter) txt(this.interactText, s.interact);
+    if (inter) { txt(this.interactKey, keyFor('interact')); txt(this.interactText, s.interact); }
     show(this.protect, !!s.spawnProtected && !s.dead && live);
 
     // ---- death

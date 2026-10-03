@@ -29,7 +29,9 @@ export class Input {
   _bind() {
     window.addEventListener('keydown', (e) => {
       if (this.captureCb) {
+        // Swallow the key completely so menu shortcuts (Esc = back) don't also act on it.
         e.preventDefault();
+        e.stopImmediatePropagation();
         const cb = this.captureCb; this.captureCb = null;
         cb(e.code === 'Escape' ? null : e.code);
         return;
@@ -50,6 +52,7 @@ export class Input {
     const onDown = (e) => {
       if (this.captureCb) {
         e.preventDefault();
+        e.stopImmediatePropagation();
         const cb = this.captureCb; this.captureCb = null;
         cb('Mouse' + e.button);
         return;

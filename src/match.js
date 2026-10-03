@@ -5,7 +5,7 @@
 // guest over the reliable channel, so both machines run the exact same event handlers.
 import * as THREE from 'three';
 import { MATCH, PLAYER, ENERGY, NET } from './config.js';
-import { getWeapon, spreadDirections, damageFalloff, ShotValidator, STARTING, MELEE, SLOT_OF } from './weapons.js';
+import { getWeapon, spreadDirections, damageFalloff, ShotValidator, STARTING, MELEE, SLOT_OF, CROUCH_SPREAD_MUL } from './weapons.js';
 import { rayPlayer, distToPlayer } from './physics.js';
 import { PICKUP_KINDS, pickupRespawn } from './pickups.js';
 
@@ -13,6 +13,8 @@ const _v = new THREE.Vector3();
 const _p = new THREE.Vector3();
 const _d = new THREE.Vector3();
 const _o = new THREE.Vector3();
+/** [x, y, z] of finite numbers (network input). */
+const vec3ok = (a) => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite);
 const r3 = (v) => [Math.round(v.x * 100) / 100, Math.round(v.y * 100) / 100, Math.round(v.z * 100) / 100];
 
 export function newPlayerState(id, name) {
@@ -272,19 +274,21 @@ export class HostAuthority {
 
   handleFire(i, f, remote = false) {
     const s = this.ps[i];
-    if (!s.alive || !this.isLive()) return false;
+    if (!s.alive || !this.isLive() || this.paused) return false;
     const def = getWeapon(f.w);
-    if (!def) return false;
+    if (!def || !vec3ok(f.o) || !vec3ok(f.d)) return false;
     const now = this.now();
     const owned = Object.values(s.inventory).includes(f.w);
     if (remote) {
-      const why = this.validators[i].check(f.w, now, owned);
-      if (why) { console.warn('[host] rejected shot', why, f.w); return false; }
-      // origin must be near the shooter's reported eye
+      // origin must be near the shooter's reported eye (written so NaN fails closed)
       const ap = this.avatars[i].getPos();
       _o.set(f.o[0], f.o[1], f.o[2]);
-      if (_o.distanceTo(_v.set(ap.x, ap.y + 1.2, ap.z)) > 3.5) { console.warn('[host] rejected shot origin'); return false; }
-      if (f.sp < def.spread.ads * 0.9 - 1e-3) f.sp = def.spread.ads;
+      if (!(_o.distanceTo(_v.set(ap.x, ap.y + 1.2, ap.z)) <= 3.5)) { console.warn('[host] rejected shot origin'); return false; }
+      const why = this.validators[i].check(f.w, now, owned, f.ct);
+      if (why) { console.warn('[host] rejected shot', why, f.w); return false; }
+      // The tightest spread a client can produce is crouched + fully aimed.
+      const floor = def.spread.ads * CROUCH_SPREAD_MUL;
+      if (!(f.sp >= floor * 0.95 - 1e-3)) f.sp = floor;
     } else if (!owned) return false;
     s.shots++;
     this._endProtection(i);
@@ -320,7 +324,8 @@ export class HostAuthority {
       const pt = _p.copy(dir).multiplyScalar(bestT).add(_o);
       if (who || tgt) {
         let dmg = def.damage * (isHead ? def.headMul : 1) * damageFalloff(def, bestT);
-        if (isHead && def.headDamage) dmg = def.headDamage;
+        // A headshot with a headDamage weapon (ENERGY RAIL) is lethal whatever the buffers.
+        if (isHead && def.headDamage) dmg = who ? Math.max(def.headDamage, who.s.health + who.s.armor) : def.headDamage;
         if (who) { victim = who; total += dmg; head ||= isHead; pelletsHit++; }
         else { tgHit = tgt; tgDmg += dmg; tgHead ||= isHead; pelletsHit++; }
         ends.push([...r3(pt), isHead ? 2 : 1]);
@@ -337,7 +342,7 @@ export class HostAuthority {
     if (victim && total > 0) {
       if (head) s.headshots++;
       this._damage(victim.s.id, total, i, { w: f.w, hs: head, from: _o, kind: 'bullet', dist: _o.distanceTo(victim.pos) });
-      if (def.knockback && victim.s.alive) {
+      if (def.knockback && victim.s.alive && !victim.prot) {
         const k = def.knockback * (pelletsHit / def.pellets);
         this.emit({ t: 'imp', p: victim.s.id, v: r3(_v.copy(_d).setY(Math.max(0.15, _d.y)).normalize().multiplyScalar(k)) });
       }
@@ -349,44 +354,55 @@ export class HostAuthority {
 
   handleMelee(i, m, remote = false) {
     const s = this.ps[i];
-    if (!s.alive || !this.isLive()) return;
+    if (!s.alive || !this.isLive() || this.paused) return;
+    if (!vec3ok(m.o) || !vec3ok(m.d) || !(Math.hypot(...m.d) > 1e-6)) return;
     const now = this.now();
+    _o.set(m.o[0], m.o[1], m.o[2]);
     if (remote) {
       if (now - (s.lastMelee || 0) < MELEE.cooldown * 0.8) return;
+      // Same origin rule as shots: the swing starts at the attacker's own eye.
+      const ap = this.avatars[i].getPos();
+      if (!(_o.distanceTo(_v.set(ap.x, ap.y + 1.2, ap.z)) <= 3.5)) return;
     }
     s.lastMelee = now;
     this._endProtection(i);
-    _o.set(m.o[0], m.o[1], m.o[2]);
     _d.set(m.d[0], m.d[1], m.d[2]).normalize();
+    // Walls, glass and floors stop a swing.
+    const wh = this.world.raycast(_o, _d, MELEE.range);
+    const reach = wh?.collider ? wh.t : MELEE.range;
     const vt = Math.min(now, Math.max(now - NET.maxRewind / 1000, m.vt ?? now));
     let hit = false;
     for (const t of this._otherAlive(i)) {
       const pos = new THREE.Vector3();
       const h = this.avatars[t.id].transformAt(vt, pos);
-      const r = rayPlayer(_o, _d, pos, h, MELEE.range, 0.35);
+      const r = rayPlayer(_o, _d, pos, h, reach, 0.35);
       if (r) {
         hit = true;
+        const prot = t.protectUntil > now;
         this._damage(t.id, MELEE.damage, i, { w: 'melee', hs: false, from: _o, kind: 'melee', dist: r.t });
-        if (t.alive) this.emit({ t: 'imp', p: t.id, v: r3(_v.copy(_d).setY(0.25).normalize().multiplyScalar(5)) });
+        if (t.alive && !prot) this.emit({ t: 'imp', p: t.id, v: r3(_v.copy(_d).setY(0.25).normalize().multiplyScalar(5)) });
       }
     }
     for (const tg of this.trainingTargets) {
       if (!tg.alive) continue;
-      if (rayPlayer(_o, _d, tg.pos, tg.height, MELEE.range, 0.35)) { this._damageTarget(tg, MELEE.damage, false, i); hit = true; }
+      if (rayPlayer(_o, _d, tg.pos, tg.height, reach, 0.35)) { this._damageTarget(tg, MELEE.damage, false, i); hit = true; }
     }
     this.emit({ t: 'melee', p: i, hit });
   }
 
+  /** Only the guest's reloads come through here (the host's own are not validated). */
   handleReload(i, r) {
-    if (r.shell) this.validators[i].shell(r.w);
-    else this.validators[i].reload(r.w);
+    if (!getWeapon(r.w)) return;
+    if (r.shell) this.validators[i].shell(r.w, r.ct, this.now());
+    else this.validators[i].reload(r.w, r.ct, this.now());
   }
 
   handleTrick(i, kind) {
     const s = this.ps[i];
-    if (!s.alive || !this.isLive()) return;
-    const gain = Math.min(ENERGY.trick[kind] || 0, s.trickBudget);
-    if (gain <= 0) return;
+    if (!s.alive || !this.isLive() || this.paused) return;
+    if (typeof kind !== 'string' || !Object.hasOwn(ENERGY.trick, kind)) return;
+    const gain = Math.min(ENERGY.trick[kind], s.trickBudget);
+    if (!(gain > 0)) return;
     s.trickBudget -= gain;
     this._addEnergy(i, gain);
   }
@@ -394,7 +410,7 @@ export class HostAuthority {
   handleRush(i) {
     const s = this.ps[i];
     const now = this.now();
-    if (!s.alive || !this.isLive() || s.energy < 100 || s.rushUntil > now) return false;
+    if (!s.alive || !this.isLive() || this.paused || !(s.energy >= 100) || s.rushUntil > now) return false;
     s.energy = 0;
     s.rushUntil = now + ENERGY.rushDuration;
     s.rushes++;
@@ -402,17 +418,20 @@ export class HostAuthority {
     return true;
   }
 
+  /** Interact is only for swapping weapons; walk-over pickups are collected in _checkPickups. */
   handleInteract(i, pickupId) {
     const s = this.ps[i];
-    if (!s.alive || !this.isLive()) return;
+    if (!s.alive || !this.isLive() || this.paused || !Number.isInteger(pickupId)) return;
     const p = this.arena.pickups[pickupId];
-    if (!p) return;
+    if (!p || p.kind !== 'weapon') return;
     const pos = this.avatars[i].getPos();
-    if (_v.set(p.pos.x - pos.x, 0, p.pos.z - pos.z).length() > 2.8 || Math.abs(p.pos.y - pos.y) > 2) return;
+    if (!(_v.set(p.pos.x - pos.x, 0, p.pos.z - pos.z).length() <= 2.8) || !(Math.abs(p.pos.y - pos.y) <= 2)) return;
+    if (!this.world.lineOfSight(_p.set(pos.x, pos.y + 1.5, pos.z), _o.set(p.pos.x, p.pos.y + 0.5, p.pos.z))) return;
     this._tryPickup(i, p, true);
   }
 
   _addEnergy(i, amt) {
+    if (!Number.isFinite(amt) || amt <= 0) return;
     const s = this.ps[i];
     const before = s.energy;
     s.energy = Math.min(PLAYER.maxEnergy, s.energy + amt);
@@ -575,6 +594,7 @@ export class HostAuthority {
   _explode(at, owner, P, direct, w, extra = {}) {
     this.emit({ t: 'boom', pos: r3(at), p: owner, id: extra.id || 0, sid: extra.sid, w });
     const now = this.now();
+    let hitEnemy = false;
     for (const s of this.ps) {
       if (!s.alive || !this.avatars[s.id]) continue;
       const pos = this.avatars[s.id].getPos();
@@ -597,11 +617,15 @@ export class HostAuthority {
       dir.y += s.id === owner ? 0.65 : 0.35;
       dir.normalize();
       // Guests predict their own rocket-jump knockback locally; everyone else gets it here.
-      const guestSelf = s.id === owner && this.avatars[s.id].kind === 'remote';
+      const guestSelf = s.id === owner && w === 'chaos' && this.avatars[s.id].kind === 'remote';
+      // Spawn protection also blocks enemy knockback (it used to shove freshly spawned players around).
+      if (s.id !== owner && s.protectUntil > now) kb = 0;
+      else if (s.id !== owner && dmg > 0) hitEnemy = true;
       if (dmg > 0) this._damage(s.id, dmg, owner, { w, hs: false, from: at, kind: 'splash', dist: owner >= 0 && owner !== s.id ? this.avatars[owner]?.getPos().distanceTo(pos) || 0 : 0 });
       if (s.alive && kb > 0 && !guestSelf) this.emit({ t: 'imp', p: s.id, v: r3(_v.copy(dir).multiplyScalar(kb)) });
       if (s.id === owner && kb > 0) this.handleTrick(owner, 'rocketjump');
     }
+    if (hitEnemy && w === 'chaos' && owner >= 0 && this.ps[owner]) this.ps[owner].hits++;
     for (const tg of this.trainingTargets) {
       if (!tg.alive) continue;
       const d = distToPlayer(at, tg.pos, tg.height);

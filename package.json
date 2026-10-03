@@ -13,6 +13,7 @@
     "test:e2e:public": "node tests/e2e-duel.mjs --public",
     "test:solo": "node tests/e2e-solo.mjs",
     "test:reconnect": "node tests/e2e-reconnect.mjs",
+    "test:rebind": "node tests/e2e-rebind.mjs",
     "screenshots": "node tests/capture-screenshots.mjs"
   },
   "dependencies": {

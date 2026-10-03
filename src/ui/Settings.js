@@ -116,6 +116,109 @@ export function drawCrosshair(ctx, cfg, cx, cy, s, spread = 0) {
 // Settings screen
 // ---------------------------------------------------------------------------------------
 
+/**
+ * Click-a-slot, press-a-key binding capture shared by SETTINGS and the CONTROLS page.
+ * `root` gets .is-capturing while listening; `onSync` redraws the slot labels.
+ */
+class BindingEditor {
+  constructor(ui, game, root, onSync) {
+    this.ui = ui;
+    this.game = game;
+    this.S = game.settings;
+    this.root = root;
+    this.onSync = onSync;
+    this.capture = null;
+    this.capToken = 0;
+  }
+
+  start(action, idx, btn) {
+    if (this.capture) {
+      const same = this.capture.btn === btn;
+      this.cancel();
+      if (same) return;
+    }
+    const token = ++this.capToken;
+    this.capture = { action, idx, btn };
+    btn.classList.add('is-listening');
+    setText(btn, 'PRESS A KEY…');
+    this.root.classList.add('is-capturing');
+    this.ui.capturing = true;
+    this.game.input.captureNext((code) => {
+      if (token !== this.capToken) return;
+      this._end();
+      if (code && (code.startsWith('Mouse') || code.startsWith('Wheel'))) this._swallowNextClick();
+      if (code == null) return;
+      if (code === 'Backspace' || code === 'Delete') this._clearSlot(action, idx);
+      else this._assign(action, idx, code);
+    });
+  }
+
+  _end() {
+    const c = this.capture;
+    this.capture = null;
+    this.ui.capturing = false;
+    this.root.classList.remove('is-capturing');
+    if (c) c.btn.classList.remove('is-listening');
+    this.onSync();
+  }
+
+  cancel() {
+    if (!this.capture) return;
+    this.capToken++;
+    try { this.game.input.captureNext(null); } catch { /* ignore */ }
+    this._end();
+  }
+
+  /** A mouse button that was just bound must not also click whatever is under the pointer. */
+  _swallowNextClick() {
+    const kill = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const opts = { capture: true };
+    window.addEventListener('click', kill, opts);
+    window.addEventListener('auxclick', kill, opts);
+    window.addEventListener('contextmenu', kill, opts);
+    setTimeout(() => {
+      window.removeEventListener('click', kill, opts);
+      window.removeEventListener('auxclick', kill, opts);
+      window.removeEventListener('contextmenu', kill, opts);
+    }, 450);
+  }
+
+  _clearSlot(action, idx) {
+    const B = structuredClone(this.S.data.controls.bindings);
+    const arr = Array.isArray(B[action]) ? B[action].slice(0, 2) : [];
+    if (idx < arr.length) arr.splice(idx, 1);
+    B[action] = arr;
+    this.S.set('controls', 'bindings', B);
+  }
+
+  _assign(action, idx, code) {
+    const B = structuredClone(this.S.data.controls.bindings);
+    let moved = null;
+    for (const a of Object.keys(B)) {
+      if (a === action || !Array.isArray(B[a])) continue;
+      const i = B[a].indexOf(code);
+      if (i >= 0) {
+        B[a].splice(i, 1);
+        moved = a;
+      }
+    }
+    const arr = Array.isArray(B[action]) ? B[action].slice(0, 2) : [];
+    const dup = arr.indexOf(code);
+    if (dup >= 0) arr.splice(dup, 1);
+    if (idx >= arr.length) arr.push(code);
+    else arr[idx] = code;
+    B[action] = arr.slice(0, 2);
+    this.S.set('controls', 'bindings', B);
+    if (moved) {
+      const left = B[moved].length === 0 ? ' — NOW UNBOUND' : '';
+      this.ui.toast(`${codeLabel(code)} MOVED FROM ${String(ACTION_LABELS[moved] || moved).toUpperCase()}${left}`, left ? 'error' : 'info', 3200);
+    }
+  }
+}
+
 export class SettingsScreen {
   constructor(ui, game) {
     this.ui = ui;
@@ -125,13 +228,12 @@ export class SettingsScreen {
     this.visible = false;
     this.dirty = false;
     this.tab = 'graphics';
-    this.capture = null;
-    this.capToken = 0;
     this.resetArmed = false;
     this.resetTimer = 0;
 
     const p = pageShell('settings', { kicker: 'SYSTEM', title: 'SETTINGS', sub: 'Changes apply instantly and are saved in this browser.', onBack: () => ui.back() });
     this.el = p.root;
+    this.binder = new BindingEditor(ui, game, this.el, () => this._syncBindings());
 
     // Tabs
     this.tabBtns = {};
@@ -449,7 +551,7 @@ export class SettingsScreen {
       this._group('RENDERING', [
         this._row('Texture quality', this._seg(g('textures'), LMH, { label: 'Texture quality' }), 'Applies on next map load'),
         this._row('Shadow quality', this._seg(g('shadows'), [{ value: 'off', label: 'OFF' }, ...LMH], { label: 'Shadow quality' })),
-        this._row('Effects quality', this._seg(g('effects'), LMH, { label: 'Effects quality' }), 'Particles, sparks, decals'),
+        this._row('Effects quality', this._seg(g('effects'), LMH, { label: 'Effects quality' }), 'Particles, sparks, decals · pool sizes apply after a page reload'),
         this._row('Anti-aliasing', this._seg(g('antialias'), [{ value: 'off', label: 'OFF' }, { value: 'fxaa', label: 'FXAA' }, { value: 'smaa', label: 'SMAA' }], { label: 'Anti-aliasing' })),
         this._row('Reflections', this._seg(g('reflections'), [{ value: 'low', label: 'LOW' }, { value: 'high', label: 'HIGH' }], { label: 'Reflections' })),
         this._row('Draw distance', this._seg(g('drawDistance'), LMH, { label: 'Draw distance' })),
@@ -530,6 +632,8 @@ export class SettingsScreen {
     ]));
   }
 
+  get capture() { return this.binder.capture; }
+
   _syncBindings() {
     const B = this.S.data.controls.bindings;
     for (const r of this.bindRows) {
@@ -545,92 +649,9 @@ export class SettingsScreen {
     }
   }
 
-  _startCapture(action, idx, btn) {
-    if (this.capture) {
-      const same = this.capture.btn === btn;
-      this._cancelCapture();
-      if (same) return;
-    }
-    const token = ++this.capToken;
-    this.capture = { action, idx, btn };
-    btn.classList.add('is-listening');
-    setText(btn, 'PRESS A KEY…');
-    this.el.classList.add('is-capturing');
-    this.ui.capturing = true;
-    this.game.input.captureNext((code) => {
-      if (token !== this.capToken) return;
-      this._endCapture();
-      if (code && (code.startsWith('Mouse') || code.startsWith('Wheel'))) this._swallowNextClick();
-      if (code == null) return;
-      if (code === 'Backspace' || code === 'Delete') this._clearSlot(action, idx);
-      else this._assign(action, idx, code);
-    });
-  }
+  _startCapture(action, idx, btn) { this.binder.start(action, idx, btn); }
 
-  _endCapture() {
-    const c = this.capture;
-    this.capture = null;
-    this.ui.capturing = false;
-    this.el.classList.remove('is-capturing');
-    if (c) c.btn.classList.remove('is-listening');
-    this._syncBindings();
-  }
-
-  _cancelCapture() {
-    if (!this.capture) return;
-    this.capToken++;
-    try { this.game.input.captureNext(null); } catch { /* ignore */ }
-    this._endCapture();
-  }
-
-  /** A mouse button that was just bound must not also click whatever is under the pointer. */
-  _swallowNextClick() {
-    const kill = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-    };
-    const opts = { capture: true };
-    window.addEventListener('click', kill, opts);
-    window.addEventListener('auxclick', kill, opts);
-    window.addEventListener('contextmenu', kill, opts);
-    setTimeout(() => {
-      window.removeEventListener('click', kill, opts);
-      window.removeEventListener('auxclick', kill, opts);
-      window.removeEventListener('contextmenu', kill, opts);
-    }, 450);
-  }
-
-  _clearSlot(action, idx) {
-    const B = structuredClone(this.S.data.controls.bindings);
-    const arr = Array.isArray(B[action]) ? B[action].slice(0, 2) : [];
-    if (idx < arr.length) arr.splice(idx, 1);
-    B[action] = arr;
-    this.S.set('controls', 'bindings', B);
-  }
-
-  _assign(action, idx, code) {
-    const B = structuredClone(this.S.data.controls.bindings);
-    let moved = null;
-    for (const a of Object.keys(B)) {
-      if (a === action || !Array.isArray(B[a])) continue;
-      const i = B[a].indexOf(code);
-      if (i >= 0) {
-        B[a].splice(i, 1);
-        moved = a;
-      }
-    }
-    const arr = Array.isArray(B[action]) ? B[action].slice(0, 2) : [];
-    const dup = arr.indexOf(code);
-    if (dup >= 0) arr.splice(dup, 1);
-    if (idx >= arr.length) arr.push(code);
-    else arr[idx] = code;
-    B[action] = arr.slice(0, 2);
-    this.S.set('controls', 'bindings', B);
-    if (moved) {
-      const left = B[moved].length === 0 ? ' — NOW UNBOUND' : '';
-      this.ui.toast(`${codeLabel(code)} MOVED FROM ${String(ACTION_LABELS[moved] || moved).toUpperCase()}${left}`, left ? 'error' : 'info', 3200);
-    }
-  }
+  _cancelCapture() { this.binder.cancel(); }
 
   // ----- CROSSHAIR -----
 
@@ -907,20 +928,37 @@ export class ControlsScreen {
     const p = pageShell('controls', { kicker: 'REFERENCE', title: 'CONTROLS', sub: 'Your current bindings and the movement tech that wins duels.', onBack: () => ui.back() });
     this.el = p.root;
     this.content = el('div', { class: 'mx-ref' });
-    p.body.append(this.content);
-    this.editBtn = mxButton({ label: 'EDIT BINDINGS', icon: 'pencil', variant: 'small', onClick: () => ui.show('settings', { tab: 'controls' }) });
-    p.foot.append(el('span', { class: 'mx-page__grow' }), this.editBtn);
+    p.body.append(el('p', { class: 'mx-binds__hint mx-ref__hint' }, [
+      'Click any key to rebind it, then press a key or mouse button. ',
+      el('kbd', { class: 'mx-key', text: 'ESC' }), ' cancels · ',
+      el('kbd', { class: 'mx-key mx-key--wide', text: 'BACKSPACE' }), ' clears.',
+    ]), this.content);
+    this.visible = false;
+    this.binder = new BindingEditor(ui, game, this.el, () => this._render());
+    this.S.onChange((section) => { if (this.visible && section === 'controls' && !this.binder.capture) this._render(); });
+    const resetBtn = mxButton({ label: 'RESET TO DEFAULTS', variant: 'ghost small', sound: 'back', onClick: () => {
+      this.binder.cancel();
+      this.S.set('controls', 'bindings', structuredClone(DEFAULT_BINDINGS));
+      this.ui.toast('KEY BINDINGS RESET TO DEFAULTS', 'success');
+    } });
+    this.editBtn = mxButton({ label: 'MORE CONTROL SETTINGS', icon: 'pencil', variant: 'small', onClick: () => ui.show('settings', { tab: 'controls' }) });
+    p.foot.append(el('span', { class: 'mx-page__grow' }), resetBtn, this.editBtn);
   }
 
+  /** Two clickable binding slots for an action (same behaviour as in SETTINGS). */
   _keys(action) {
     const codes = bindingsFor(this.S, action);
-    if (!codes.length) return [el('span', { class: 'mx-ref__unbound', text: 'UNBOUND' })];
-    const out = [];
-    codes.forEach((c, i) => {
-      if (i) out.push(el('span', { class: 'mx-ref__or', text: 'OR' }));
-      out.push(keycap(c));
+    return [0, 1].map((i) => {
+      const code = codes[i];
+      const b = el('button', {
+        type: 'button', class: `mx-keyslot mx-keyslot--ref${code ? '' : ' is-empty'}`,
+        'aria-label': `${ACTION_LABELS[action] || action} binding ${i + 1}`, title: 'Click to rebind',
+        text: code ? codeLabel(code) : (i === 0 ? 'UNBOUND' : '+'),
+      });
+      if (!code && i === 0) b.classList.add('is-unbound');
+      b.addEventListener('click', () => this.binder.start(action, i, b));
+      return b;
     });
-    return out;
   }
 
   _render() {
@@ -977,10 +1015,21 @@ export class ControlsScreen {
   }
 
   onShow() {
+    this.visible = true;
     this._render();
   }
 
+  onHide() {
+    this.visible = false;
+    this.binder.cancel();
+  }
+
+  onBack() {
+    // Esc while listening for a key is consumed by the capture itself.
+    return !!this.binder.capture;
+  }
+
   focusTarget() {
-    return this.editBtn;
+    return this.content.querySelector('.mx-keyslot') || this.editBtn;
   }
 }

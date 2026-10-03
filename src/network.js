@@ -97,12 +97,16 @@ export class NetSession {
         return;
       }
       this.guestToken = m.token;
+      this.guestSrc = src;
+      this.guestPaired = true;
       this.peerName = m.name || 'PLAYER 2';
       this.signal.pair(src);
       this.signal.replyTo(src, { k: 'welcome', accept: true, name: this.name, v: PROTOCOL_VERSION });
       this._newLink(false);
       return;
     }
+    // Everything else must come from the accepted guest (a rejected joiner's 'bye' must not end the match).
+    if (!this.guestPaired || src !== this.guestSrc) return;
     if (m.k === 'bye') { if (this.link || this.state === 'reconnecting') this._peerLeft('left'); return; }
     if ((m.k === 'sdp' || m.k === 'ice') && this.link) this.link.handleSignal(m);
   }
@@ -166,7 +170,7 @@ export class NetSession {
       if (this.link !== link || this.closed) return;
       this._linkLost(reason);
     });
-    link.on('message', (data, fast) => this._onData(data, fast));
+    link.on('message', (data, fast) => { if (this.link === link) this._onData(data, fast); });
     link.on('state', (s) => { this._log('pc', s); this.emit('pcstate', s); });
     // Fail fast if ICE never completes.
     setTimeout(() => {
@@ -231,6 +235,9 @@ export class NetSession {
       else { this.emit('closed', { reason: 'connect-failed' }); this.leave(false); }
       return;
     }
+    // Tear the link down so the other side notices too and re-handshakes (a half-dead link would
+    // otherwise keep answering pings and the peer would never knock again).
+    if (this.link) { const l = this.link; this.link = null; l.close(); }
     this._enterReconnecting(reason);
     if (this.role === 'guest') this._guestReconnectLoop();
   }
@@ -256,6 +263,8 @@ export class NetSession {
     if (this.link) { const l = this.link; this.link = null; l.close(); }
     this.state = 'waiting';
     this.guestToken = null;
+    this.guestPaired = false;
+    this.guestSrc = null;
     this.signal?.pair?.(null);
     this.status('WAITING FOR PLAYER…');
   }
@@ -293,6 +302,8 @@ export class NetSession {
       // Keep the room open for a new opponent.
       this.state = 'waiting';
       this.guestToken = null;
+      this.guestPaired = false;
+      this.guestSrc = null;
       this.peerName = '';
       this.signal.pair?.(null);
       this.signal.releaseGuest?.();

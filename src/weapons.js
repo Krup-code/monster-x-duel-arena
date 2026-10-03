@@ -3,11 +3,14 @@
 // reproduce exactly the pellets a client fired. ShotValidator is the host-side check.
 import * as THREE from 'three';
 import { WEAPONS, getWeapon } from './weapons/index.js';
+import { ENERGY } from './config.js';
 
 export { WEAPONS, getWeapon };
 
 export const SLOT_OF = (id) => getWeapon(id).slot;
 export const MELEE = { damage: 55, range: 2.4, cooldown: 0.85, duration: 0.5 };
+/** Spread multiplier for crouching on the ground (shared by the client and the host's check). */
+export const CROUCH_SPREAD_MUL = 0.8;
 
 export function mulberry(seed) {
   let a = seed >>> 0;
@@ -164,7 +167,7 @@ export class WeaponController {
     const speed = Math.min(1.4, (ctx.speed || 0) / 7);
     const base = THREE.MathUtils.lerp(s.base, s.ads, this.ads);
     let v = base + s.move * speed * (1 - this.ads * 0.5) + (ctx.onGround ? 0 : s.air) + this.bloom;
-    if (ctx.crouching && ctx.onGround && !ctx.sliding) v *= 0.8;
+    if (ctx.crouching && ctx.onGround && !ctx.sliding) v *= CROUCH_SPREAD_MUL;
     return Math.min(v, Math.max(s.max, base));
   }
 
@@ -292,14 +295,18 @@ export class ShotValidator {
   constructor() { this.reset(STARTING); }
 
   reset(loadout) {
-    this.state = {};
+    this.state = Object.create(null);
     for (const id of Object.values(loadout)) if (id) this._init(id);
   }
 
   _init(id) {
     const d = getWeapon(id);
-    this.state[id] = { tokens: 2, last: 0, mag: d.mag, reserve: d.reserve };
+    if (!d) return;
+    this.state[id] = { tokens: 1, last: 0, lastCt: -Infinity, lastShotCt: -Infinity, lastShellCt: -Infinity, mag: d.mag, reserve: d.reserve };
   }
+
+  /** Client timestamps must be close to the host clock (late = network bunching, early = clock error). */
+  static _ctOk(ct, now) { return Number.isFinite(ct) && ct <= now + 0.2 && ct >= now - 0.75; }
 
   give(id, replaced) {
     if (replaced && this.state[replaced]) delete this.state[replaced];
@@ -307,35 +314,52 @@ export class ShotValidator {
     else this.state[id].reserve = getWeapon(id).reserve;
   }
 
-  /** now in seconds (host clock). Returns '' if ok, or a reason string. */
-  check(id, now, owned) {
+  /**
+   * now = host clock, ct = the shooter's own (host-synced) time of the shot, both in seconds.
+   * Cadence is checked on ct, so shots that arrive bunched after a network stall still pass,
+   * while a loose arrival-time bucket stops banking up a burst. Returns '' if ok, or a reason.
+   */
+  check(id, now, owned, ct) {
     if (!owned) return 'not-owned';
-    const s = this.state[id] || (this._init(id), this.state[id]);
     const d = getWeapon(id);
-    // token bucket refilled at the weapon's legal fire rate (with 15% jitter tolerance)
-    const rate = 1 / (d.fireInterval * 0.85);
-    s.tokens = Math.min(2, s.tokens + (now - s.last) * rate);
+    if (!d) return 'unknown';
+    const s = this.state[id] || (this._init(id), this.state[id]);
+    if (!ShotValidator._ctOk(ct, now)) return 'time';
+    if (ct - s.lastCt < d.fireInterval * 0.9) return 'rate';
+    const cap = Math.ceil(0.5 / d.fireInterval) + 1;
+    s.tokens = Math.min(cap, s.tokens + (now - s.last) / (d.fireInterval * 0.85));
     s.last = now;
     if (s.tokens < 1) return 'rate';
     if (s.mag <= -1) return 'ammo';
     s.tokens -= 1;
+    s.lastCt = s.lastShotCt = ct;
     s.mag -= 1;
     return '';
   }
 
-  reload(id) {
+  /** Host-side minimum time a reload / shell insert takes (with tolerance). */
+  static _reloadMin(d) { return (d.reloadTime / ENERGY.rushReloadMul) * 0.8; }
+
+  /** Offline / host-local reloads pass no timestamps and are trusted. */
+  reload(id, ct, now) {
     const s = this.state[id];
-    if (!s) return;
     const d = getWeapon(id);
+    if (!s || !d || s.mag >= d.mag) return;
+    if (ct !== undefined && (!ShotValidator._ctOk(ct, now) || ct - s.lastShotCt < ShotValidator._reloadMin(d))) return;
     const need = d.mag - Math.max(0, s.mag);
     const take = s.reserve === Infinity ? need : Math.min(need, s.reserve);
     s.mag = Math.max(0, s.mag) + take;
     if (s.reserve !== Infinity) s.reserve -= take;
   }
 
-  shell(id) {
+  shell(id, ct, now) {
     const s = this.state[id];
-    if (!s) return;
+    const d = getWeapon(id);
+    if (!s || !d || s.mag >= d.mag) return;
+    if (ct !== undefined) {
+      if (!ShotValidator._ctOk(ct, now) || ct - Math.max(s.lastShotCt, s.lastShellCt) < ShotValidator._reloadMin(d)) return;
+      s.lastShellCt = ct;
+    }
     if (s.reserve > 0) { s.mag = Math.max(0, s.mag) + 1; if (s.reserve !== Infinity) s.reserve--; }
   }
 }

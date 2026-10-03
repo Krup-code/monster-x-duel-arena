@@ -118,6 +118,7 @@ export class FirebaseSignaling {
       return { uid, joinedAt: Date.now() };
     });
     if (!claim.committed) throw new Error('ROOM_FULL');
+    this.claimed = true;
     await db.onDisconnect(this._ref('guest')).remove();
     this._listen('toGuest');
     return new Promise((resolve, reject) => {
@@ -125,7 +126,7 @@ export class FirebaseSignaling {
       const onMsg = (msg) => {
         if (msg.k !== 'welcome') return;
         cleanup();
-        if (msg.accept) resolve(msg);
+        if (msg.accept) { this.accepted = true; resolve(msg); }
         else reject(new Error(msg.reason === 'full' ? 'ROOM_FULL' : 'ROOM_REJECTED'));
       };
       const cleanup = () => { clearTimeout(timer); this.handlers = this.handlers.filter((h) => h !== onMsg); };
@@ -164,8 +165,9 @@ export class FirebaseSignaling {
     if (!this.f || !this.code) return;
     const { db } = this.f;
     if (this.isHost) db.remove(this._ref('')).catch(() => {});
-    else {
-      this.send({ k: 'bye' });
+    else if (this.claimed) {
+      // Only a guest the host actually accepted may say goodbye; a refused joiner just frees its claim.
+      if (this.accepted) this.send({ k: 'bye' });
       db.remove(this._ref('guest')).catch(() => {});
     }
   }

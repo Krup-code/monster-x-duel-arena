@@ -22,7 +22,8 @@ for (const def of Object.values(WEAPONS)) {
 /** Look up a weapon definition by string id (or numeric network id). Returns null if unknown. */
 export function getWeapon(id) {
   const key = typeof id === 'number' ? WEAPON_BY_ID[id] : id;
-  return WEAPONS[key] ?? null;
+  // Own keys only: an id like '__proto__' or 'constructor' from the network must not resolve.
+  return typeof key === 'string' && Object.hasOwn(WEAPONS, key) ? WEAPONS[key] : null;
 }
 
 /** Build a fresh THREE.Group for the weapon. opts: { detail: 'high' | 'low' }. */

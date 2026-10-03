@@ -135,6 +135,7 @@ export class PostFX {
     this.bloom = null;
     if (g.bloom) {
       const scale = g.effects === 'low' ? 0.5 : 1;
+      this.bloomScale = scale;
       this.bloom = new UnrealBloomPass(new THREE.Vector2(size.x * scale, size.y * scale), 0.55, 0.45, 1.0);
       composer.addPass(this.bloom);
     }
@@ -151,6 +152,11 @@ export class PostFX {
   setSize(w, h) {
     if (!this.composer) return;
     this.composer.setSize(w, h);
+    // composer.setSize resizes every pass to full size; keep low-effects bloom at half resolution.
+    if (this.bloom && this.bloomScale !== 1) {
+      const pr = this.composer._pixelRatio || 1;
+      this.bloom.setSize(Math.round(w * pr * this.bloomScale), Math.round(h * pr * this.bloomScale));
+    }
     if (this.overlay) this.overlay.uniforms.uAspect.value = w / Math.max(1, h);
   }
 
